@@ -5,8 +5,15 @@ LDA模型定义，一个文件搞定一个模型
 """
 
 import os
+import math
 import random
 import logging
+import operator
+import functools
+import statistics
+
+# 全局变量
+INF = float("inf")
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -122,7 +129,8 @@ class CorpusSet(object):
         """
         # 定义关于word的变量
         self.local_bi = BiDictionary()      # id和word之间的本地双向字典，key为id，value为word
-        self.V = 0                          # 数据集中word的数量
+        self.V = 0                          # 数据集中word的数量（排重之后的）
+        self.words_count = 0                # 数据集中word的数量（排重之前的）
 
         # 定义关于article的变量
         self.artids_list = []               # 全部article的id的列表，按照数据读取的顺序存储
@@ -187,10 +195,13 @@ class CorpusSet(object):
                 self.artids_list.append(art_id)
                 self.arts_Z.append(art_wordid_list)
 
-        # 做相关初始计算
+        # 做相关初始计算--word相关
         self.V = len(self.local_bi)
+        self.words_count = functools.reduce(operator.add, map(len, self.arts_Z))
+        logging.debug("words number: " + str(self.V) + ", " + str(self.words_count))
+
+        # 做相关初始计算--article相关
         self.M = len(self.artids_list)
-        logging.debug("words number: " + str(self.V))
         logging.debug("articles number: " + str(self.M))
         return
 
@@ -237,7 +248,7 @@ class LdaBase(CorpusSet):
         self.dir_path = ""          # 文件夹路径，用于存放LDA运行的数据、中间结果等
         self.model_name = ""        # LDA训练或推断的模型名称，也用于读取训练的结果
         self.current_iter = 0       # LDA训练或推断的模型已经迭代的次数，用于继续模型训练过程
-        self.iters_num = 0          # LDA训练或推断过程中Gibbs抽样迭代的总次数
+        self.iters_num = 0          # LDA训练或推断过程中Gibbs抽样迭代的总次数，整数值或者'auto'
         self.topics_num = 0         # LDA训练或推断过程中的topics的数量，即K值
         self.K = 0                  # LDA训练或推断的模型中的topic的数量，即self.topics_num
         self.twords_num = 0         # LDA训练或推断结束后输出与每个topic相关的word的个数
@@ -310,6 +321,14 @@ class LdaBase(CorpusSet):
         self.init_statistics_word()
         return
 
+    def sum_alpha_beta(self):
+        """
+        :key: 计算alpha、beta的和
+        """
+        self.sum_alpha = sum(self.alpha)
+        self.sum_beta = sum(self.beta)
+        return
+
     def calculate_theta(self):
         """
         :key: 初始化并计算模型的theta值(M*K)，用到alpha值
@@ -328,21 +347,40 @@ class LdaBase(CorpusSet):
                      (self.nwsum[k] + self.sum_beta) for w in range(self.V)] for k in range(self.K)]
         return
 
-    def sum_alpha_beta(self):
+    # ----------------------------------------------Gibbs抽样算法--------------------------------------------------------
+    def gibbs_sampling(self, is_calculate_preplexity):
         """
-        :key: 计算alpha、beta的和
+        :key: LDA模型中的Gibbs抽样过程
+        :param is_calculate_preplexity: 是否计算preplexity值
         """
-        self.sum_alpha = sum(self.alpha)
-        self.sum_beta = sum(self.beta)
-        return
+        # 计算preplexity值用到的变量
+        preplexity_list = []
+        preplexity_var = INF
 
-    def gibbs_sampling(self):
-        """
-        LDA模型中的Gibbs抽样过程
-        """
+        # 开始迭代
         last_iter = self.current_iter + 1
-        for self.current_iter in range(last_iter, last_iter+self.iters_num):
-            logging.debug('\titeration ' + str(self.current_iter) + '......')
+        iters_num = self.iters_num if self.iters_num != 'auto' else 10000
+        for self.current_iter in range(last_iter, last_iter+iters_num):
+
+            # 是否计算preplexity值
+            if is_calculate_preplexity:
+                preplexity = self.calculate_perplexity()
+                preplexity_list.append(preplexity)
+                preplexity_var = statistics.variance(preplexity_list[-10:]) if len(preplexity_list) >= 10 else INF
+
+                info = (", preplexity: " + str(preplexity))
+                info += (", var: " + str(preplexity_var)) if len(preplexity_list) >= 10 else ""
+            else:
+                info = "......"
+
+            # 输出Debug信息
+            logging.debug("\titeration " + str(self.current_iter) + info)
+
+            # 判断是否跳出循环
+            if self.iters_num == "auto" and preplexity_var < 5:
+                break
+
+            # 对每篇article的每个word进行一次抽样，抽取合适的k值
             for m in range(self.M):
                 for n in range(len(self.Z[m])):
                     w = self.arts_Z[m][n]
@@ -391,13 +429,31 @@ class LdaBase(CorpusSet):
         # 抽样完毕
         return
 
+    # ---------------------------------------------计算Perplexity值------------------------------------------------------
+    def calculate_perplexity(self):
+        """
+        :key: 计算Perplexity值，并返回
+        """
+        # 计算theta和phi值
+        self.calculate_theta()
+        self.calculate_phi()
+
+        # 开始计算
+        preplexity = 0.0
+        for m in range(self.M):
+            for w in self.arts_Z[m]:
+                values = [self.theta[m][k] * self.phi[k][w] for k in range(self.K)]
+                preplexity += math.log(functools.reduce(operator.add, values))
+
+        return math.exp(-(preplexity / self.words_count))
+
     # -----------------------------------Model数据存储、读取相关函数-------------------------------------------------------
     def save_parameter(self, file_name):
         """
-        :key: 保存模型相关参数数据，包括：topics_num, M, V, K, alpha, beta
+        :key: 保存模型相关参数数据，包括：topics_num, M, V, K, words_count, alpha, beta
         """
         with open(file_name, "w", encoding="utf-8") as f_param:
-            for item in ['topics_num', 'M', 'V', 'K']:
+            for item in ['topics_num', 'M', 'V', 'K', 'words_count']:
                 f_param.write('%s\t%s\n' % (item, str(self.__dict__[item])))
             f_param.write('alpha\t%s\n' % ','.join([str(item) for item in self.alpha]))
             f_param.write('beta\t%s\n' % ','.join([str(item) for item in self.beta]))
@@ -410,7 +466,7 @@ class LdaBase(CorpusSet):
         with open(file_name, "r", encoding="utf-8") as f_param:
             for line in f_param:
                 key, value = line.strip().split()
-                if key in ['topics_num', 'M', 'V', 'K']:
+                if key in ['topics_num', 'M', 'V', 'K', 'words_count']:
                     self.__dict__[key] = int(value)
                 elif key in ['alpha', 'beta']:
                     self.__dict__[key] = [float(item) for item in value.split(',')]
@@ -474,6 +530,7 @@ class LdaBase(CorpusSet):
         :key: 保存模型
         """
         name_predix = "%s-%05d" % (self.model_name, self.current_iter)
+
         # 保存训练结果
         self.save_parameter(os.path.join(self.dir_path, '%s.%s' % (name_predix, "param")))
         self.save_wordmap(os.path.join(self.dir_path, '%s.%s' % (name_predix, "wordmap")))
@@ -494,12 +551,13 @@ class LdaModel(LdaBase):
     LDA模型定义，主要实现训练、继续训练、推断的过程
     """
 
-    def init_train_model(self, dir_path, model_name, current_iter, iters_num=500, topics_num=20, twords_num=200,
+    def init_train_model(self, dir_path, model_name, current_iter, iters_num=None, topics_num=10, twords_num=200,
                          alpha=-1.0, beta=0.01, data_file=''):
         """
         :key: 初始化训练模型，根据参数current_iter决定是初始化新模型，还是加载已有模型
         :key: 当初始化新模型时，所有的参数都需要
         :key: 当加载已有模型时，只需要dir_path, model_name, current_iter, iters_num, twords_num即可
+        :param iters_num: 可以为整数值或者”auto“
         """
         if current_iter == 0:
             logging.debug("init a new train model")
@@ -535,7 +593,7 @@ class LdaModel(LdaBase):
             # 加载已有模型
             name_predix = "%s-%05d" % (self.model_name, self.current_iter)
 
-            # 加载dir_path目录下的模型参数文件，即加载topics_num, M, V, K, alpha, beta
+            # 加载dir_path目录下的模型参数文件，即加载topics_num, M, V, K, words_count, alpha, beta
             self.load_parameter(os.path.join(self.dir_path, '%s.%s' % (name_predix, "param")))
 
             # 加载dir_path目录下的wordmap文件，即加载self.local_bi和self.V
@@ -557,8 +615,9 @@ class LdaModel(LdaBase):
         """
         :key: 训练模型，对语料集中的所有数据进行Gibbs抽样，并保存最后的抽样结果
         """
-        logging.debug('sample iteration start')
-        self.gibbs_sampling()
+        # Gibbs抽样
+        logging.debug('sample iteration start, iters_num: ' + str(self.iters_num))
+        self.gibbs_sampling(is_calculate_preplexity=True)
         logging.debug('sample iteration finish')
 
         # 保存模型
@@ -613,7 +672,7 @@ class LdaModel(LdaBase):
             self.init_statistics()
 
             # 开始推断
-            self.gibbs_sampling()
+            self.gibbs_sampling(is_calculate_preplexity=False)
 
             # 计算theta
             self.calculate_theta()
@@ -638,11 +697,11 @@ if __name__ == '__main__':
     # 测试新模型
     if test_type == "new":
         model = LdaModel()
-        model.init_train_model("data/", "model", current_iter=0, iters_num=100, topics_num=10, data_file="corpus.txt")
+        model.init_train_model("data/", "model", current_iter=0, iters_num="auto", data_file="corpus.txt")
         model.begin_gibbs_sampling_train()
     elif test_type == "continue":
         model = LdaModel()
-        model.init_train_model("data/", "model", current_iter=100, iters_num=200)
+        model.init_train_model("data/", "model", current_iter=100, iters_num="auto")
         model.begin_gibbs_sampling_train()
     elif test_type == "inference":
         model = LdaModel()
