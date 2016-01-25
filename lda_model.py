@@ -11,14 +11,18 @@ import logging
 import operator
 import functools
 import statistics
+from collections import defaultdict
 
-# 全局变量
-INF = float("inf")
+
+# 全局变量---------------------------------------------------------------------------------------------------------------
+INF = float("inf")          # 无穷大值
+MAX_ITER_NUM = 10000        # 最大迭代次数
+VAR_NUM = 20                # 自动计算迭代次数时，计算方差的区间大小
+# 全局变量---------------------------------------------------------------------------------------------------------------
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
+# ------------------------------------------------类BiDictionary--------------------------------------------------------
 # ----------------------------------------------------------------------------------------------------------------------
 class BiDictionary(object):
     """
@@ -115,8 +119,7 @@ class BiDictionary(object):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
+# ------------------------------------------------类CorpusSet-----------------------------------------------------------
 # ----------------------------------------------------------------------------------------------------------------------
 class CorpusSet(object):
     """
@@ -226,8 +229,7 @@ class CorpusSet(object):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
+# ------------------------------------------------类LdaBase-------------------------------------------------------------
 # ----------------------------------------------------------------------------------------------------------------------
 class LdaBase(CorpusSet):
     """
@@ -274,8 +276,11 @@ class LdaBase(CorpusSet):
         self.sum_alpha = 0.0        # alpha的和
         self.sum_beta = 0.0         # beta的和
 
+        # 先验知识，格式为id:[k1, k2, ...]
+        self.prior_word = defaultdict(list)
+
         # 推断时需要的训练模型
-        self.train_model = None     # 推断时需要的训练模型
+        self.train_model = None
         return
 
     # --------------------------------------------------辅助函数---------------------------------------------------------
@@ -347,88 +352,6 @@ class LdaBase(CorpusSet):
                      (self.nwsum[k] + self.sum_beta) for w in range(self.V)] for k in range(self.K)]
         return
 
-    # ----------------------------------------------Gibbs抽样算法--------------------------------------------------------
-    def gibbs_sampling(self, is_calculate_preplexity):
-        """
-        :key: LDA模型中的Gibbs抽样过程
-        :param is_calculate_preplexity: 是否计算preplexity值
-        """
-        # 计算preplexity值用到的变量
-        preplexity_list = []
-        preplexity_var = INF
-
-        # 开始迭代
-        last_iter = self.current_iter + 1
-        iters_num = self.iters_num if self.iters_num != 'auto' else 10000
-        for self.current_iter in range(last_iter, last_iter+iters_num):
-
-            # 是否计算preplexity值
-            if is_calculate_preplexity:
-                preplexity = self.calculate_perplexity()
-                preplexity_list.append(preplexity)
-                preplexity_var = statistics.variance(preplexity_list[-10:]) if len(preplexity_list) >= 10 else INF
-
-                info = (", preplexity: " + str(preplexity))
-                info += (", var: " + str(preplexity_var)) if len(preplexity_list) >= 10 else ""
-            else:
-                info = "......"
-
-            # 输出Debug信息
-            logging.debug("\titeration " + str(self.current_iter) + info)
-
-            # 判断是否跳出循环
-            if self.iters_num == "auto" and preplexity_var < 5:
-                break
-
-            # 对每篇article的每个word进行一次抽样，抽取合适的k值
-            for m in range(self.M):
-                for n in range(len(self.Z[m])):
-                    w = self.arts_Z[m][n]
-                    k = self.Z[m][n]
-
-                    # 统计计数减一
-                    self.nd[m][k] -= 1
-                    self.ndsum[m] -= 1
-                    self.nw[w][k] -= 1
-                    self.nwsum[k] -= 1
-
-                    # 计算theta值--下边的过程为抽取第m篇article的第n个词w的topic，即新的k
-                    theta_p = [(self.nd[m][k] + self.alpha[k]) /
-                               (self.ndsum[m] + self.sum_alpha) for k in range(self.K)]
-
-                    # 计算phi值--判断是训练模型，还是推断模型（注意self.beta[w_g]）
-                    if self.local_2_global and self.train_model:
-                        w_g = self.local_2_global[w]
-                        phi_p = [(self.train_model.nw[w_g][k] + self.nw[w][k] + self.beta[w_g]) /
-                                 (self.train_model.nwsum[k] + self.nwsum[k] + self.sum_beta) for k in range(self.K)]
-                    else:
-                        phi_p = [(self.nw[w][k] + self.beta[w]) /
-                                 (self.nwsum[k] + self.sum_beta) for k in range(self.K)]
-
-                    # multi_p为多项式分布的参数，此时没有进行标准化
-                    multi_p = [theta_p[k] * phi_p[k] for k in range(self.K)]
-
-                    # 将multi_p进行累加，然后确定随机数 u 落在哪个topic附近，此时的topic即为抽取的topic
-                    for k in range(1, self.K):
-                        multi_p[k] += multi_p[k-1]
-                    u = random.random() * multi_p[self.K - 1]
-                    for topic in range(self.K):
-                        if multi_p[topic] > u:
-                            # 此时的topic即为Gibbs抽样得到的topic，它有较大的概率命中多项式概率大的topic
-                            k = topic
-                            break
-
-                    # 统计计数加一
-                    self.nd[m][k] += 1
-                    self.ndsum[m] += 1
-                    self.nw[w][k] += 1
-                    self.nwsum[k] += 1
-
-                    # 更新Z值
-                    self.Z[m][n] = k
-        # 抽样完毕
-        return
-
     # ---------------------------------------------计算Perplexity值------------------------------------------------------
     def calculate_perplexity(self):
         """
@@ -447,7 +370,104 @@ class LdaBase(CorpusSet):
 
         return math.exp(-(preplexity / self.words_count))
 
-    # -----------------------------------Model数据存储、读取相关函数-------------------------------------------------------
+    # --------------------------------------------------静态函数---------------------------------------------------------
+    @staticmethod
+    def multinomial_sample(pro_list):
+        """
+        :key: 静态函数，多项式分布抽样
+        :param pro_list: [0.2, 0.7, 0.4, 0.1]，此时说明返回下标1的可能性大，但也不绝对
+        """
+        # 将pro_list进行累加
+        for k in range(1, len(pro_list)):
+            pro_list[k] += pro_list[k-1]
+
+        # 确定随机数 u 落在哪个下标值，此时的下标值即为抽取的类别（random返回: [0, 1.0) ）
+        u = random.random() * pro_list[-1]
+
+        return_index = len(pro_list) - 1
+        for t in range(len(pro_list)):
+            if pro_list[t] > u:
+                return_index = t
+                break
+        return return_index
+
+    # ----------------------------------------------Gibbs抽样算法--------------------------------------------------------
+    def gibbs_sampling(self, is_calculate_preplexity):
+        """
+        :key: LDA模型中的Gibbs抽样过程
+        :param is_calculate_preplexity: 是否计算preplexity值
+        """
+        # 计算preplexity值用到的变量
+        preplexity_list = []
+        preplexity_var = INF
+
+        # 开始迭代
+        last_iter = self.current_iter + 1
+        iters_num = self.iters_num if self.iters_num != 'auto' else MAX_ITER_NUM
+        for self.current_iter in range(last_iter, last_iter+iters_num):
+            # 是否计算preplexity值
+            info = "......"
+            if is_calculate_preplexity:
+                preplexity = self.calculate_perplexity()
+                preplexity_list.append(preplexity)
+                preplexity_var = statistics.variance(preplexity_list[-VAR_NUM:]) if len(preplexity_list) >= VAR_NUM else INF
+                info = (", preplexity: " + str(preplexity)) + ((", var: " + str(preplexity_var)) if len(preplexity_list) >= VAR_NUM else "")
+
+            # 输出Debug信息
+            logging.debug("\titeration " + str(self.current_iter) + info)
+
+            # 判断是否跳出循环
+            if self.iters_num == "auto" and preplexity_var < (VAR_NUM / 2):
+                break
+
+            # 对每篇article的每个word进行一次抽样，抽取合适的k值
+            for m in range(self.M):
+                for n in range(len(self.Z[m])):
+                    w = self.arts_Z[m][n]
+                    k = self.Z[m][n]
+
+                    # 统计计数减一
+                    self.nd[m][k] -= 1
+                    self.ndsum[m] -= 1
+                    self.nw[w][k] -= 1
+                    self.nwsum[k] -= 1
+
+                    if self.prior_word and (w in self.prior_word):
+                        # 带有先验知识
+                        k = random.choice(self.prior_word[w])
+                    else:
+                        # 正常抽样
+                        # 计算theta值--下边的过程为抽取第m篇article的第n个词w的topic，即新的k
+                        theta_p = [(self.nd[m][k] + self.alpha[k]) /
+                                   (self.ndsum[m] + self.sum_alpha) for k in range(self.K)]
+
+                        # 计算phi值--判断是训练模型，还是推断模型（注意self.beta[w_g]）
+                        if self.local_2_global and self.train_model:
+                            w_g = self.local_2_global[w]
+                            phi_p = [(self.train_model.nw[w_g][k] + self.nw[w][k] + self.beta[w_g]) /
+                                     (self.train_model.nwsum[k] + self.nwsum[k] + self.sum_beta) for k in range(self.K)]
+                        else:
+                            phi_p = [(self.nw[w][k] + self.beta[w]) /
+                                     (self.nwsum[k] + self.sum_beta) for k in range(self.K)]
+
+                        # multi_p为多项式分布的参数，此时没有进行标准化
+                        multi_p = [theta_p[k] * phi_p[k] for k in range(self.K)]
+
+                        # 此时的topic即为Gibbs抽样得到的topic，它有较大的概率命中多项式概率大的topic
+                        k = LdaBase.multinomial_sample(multi_p)
+
+                    # 统计计数加一
+                    self.nd[m][k] += 1
+                    self.ndsum[m] += 1
+                    self.nw[w][k] += 1
+                    self.nwsum[k] += 1
+
+                    # 更新Z值
+                    self.Z[m][n] = k
+        # 抽样完毕
+        return
+
+    # -----------------------------------------Model数据存储、读取相关函数-------------------------------------------------
     def save_parameter(self, file_name):
         """
         :key: 保存模型相关参数数据，包括：topics_num, M, V, K, words_count, alpha, beta
@@ -515,6 +535,22 @@ class LdaBase(CorpusSet):
                 f_twords.writelines(["\t%s %f\n" % (self.local_bi.get_value(w), p) for w, p in words_list[:out_num]])
         return
 
+    def load_twords(self, file_name):
+        """
+        :key: 加载模型的twords数据，即先验数据
+        """
+        self.prior_word.clear()
+        topic = -1
+        with open(file_name, "r", encoding="utf-8") as f_twords:
+            for line in f_twords:
+                if line.startswith("Topic"):
+                    topic = int(line.strip()[6:-3])
+                else:
+                    frags = line.strip().split()
+                    word_id = self.local_bi.get_key(frags[0].strip())
+                    self.prior_word[word_id].append(topic)
+        return
+
     def save_tag(self, file_name):
         """
         :key: 输出模型最终给数据打标签的结果，用到theta值
@@ -543,8 +579,7 @@ class LdaBase(CorpusSet):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
-# ----------------------------------------------------------------------------------------------------------------------
+# --------------------------------------------类LdaModel----------------------------------------------------------------
 # ----------------------------------------------------------------------------------------------------------------------
 class LdaModel(LdaBase):
     """
@@ -552,10 +587,10 @@ class LdaModel(LdaBase):
     """
 
     def init_train_model(self, dir_path, model_name, current_iter, iters_num=None, topics_num=10, twords_num=200,
-                         alpha=-1.0, beta=0.01, data_file=''):
+                         alpha=-1.0, beta=0.01, data_file='', prior_file=''):
         """
         :key: 初始化训练模型，根据参数current_iter决定是初始化新模型，还是加载已有模型
-        :key: 当初始化新模型时，所有的参数都需要
+        :key: 当初始化新模型时，所有的参数都需要，除了prior_file先验文件
         :key: 当加载已有模型时，只需要dir_path, model_name, current_iter, iters_num, twords_num即可
         :param iters_num: 可以为整数值或者”auto“
         """
@@ -605,8 +640,12 @@ class LdaModel(LdaBase):
         # 初始化统计计数
         self.init_statistics()
 
-        # 初始化其他参数
+        # 计算alpha和beta的和值
         self.sum_alpha_beta()
+
+        # 初始化先验知识
+        if prior_file:
+            self.load_twords(prior_file)
 
         # 返回该模型
         return self
@@ -701,11 +740,11 @@ if __name__ == '__main__':
         model.begin_gibbs_sampling_train()
     elif test_type == "continue":
         model = LdaModel()
-        model.init_train_model("data/", "model", current_iter=100, iters_num="auto")
+        model.init_train_model("data/", "model", current_iter=152, iters_num="auto", prior_file="prior.twords")
         model.begin_gibbs_sampling_train()
     elif test_type == "inference":
         model = LdaModel()
-        model.init_inference_model(LdaModel().init_train_model("data/", "model", current_iter=100))
+        model.init_inference_model(LdaModel().init_train_model("data/", "model", current_iter=321))
         data = [
             "com.cmcomiccp.client	咪咕 漫画 咪咕 漫画 漫画 更名 咪咕 漫画 资源 偷星 国漫 全彩 日漫 实时 在线看 随心所欲 登陆 漫画 资源 黑白 全彩 航海王 火影忍者 龙珠 日漫 强势 咪咕 漫画 国内 日本 集英社 全彩 漫画 版权 国内 知名 漫画 工作室 合作 蔡志忠 姚非 夏达 黄玉郎 逢春 漫画家 优秀作品 国漫 漫画 界面 简洁 直观 画面 全彩 横屏 竖屏 流量 漫画 世界 作者 咪咕 数字 传媒 中文 内容 ui 界面 图书 频道 bug4 新咪咕 梦想 更名 咪咕 漫画 漫画 更名 咪咕 漫画 资源 偷星 国漫 全彩 日漫 实时 在线看 随心所欲 漫画 界面 简洁 直观 画面 全彩 横屏 竖屏 流量 漫画 世界 咪咕 漫画 漫画 更名 咪咕 漫画 资源 偷星 国漫 全彩 日漫 实时 在线看 随心所欲 漫画 界面 简洁 直观 画面 全彩 横屏 竖屏 流量 漫画 世界 新闻 漫画 搞笑 电子书 热血 动作 新闻阅读 漫画 搞笑 电子书 热血 动作",
             "com.cnmobi.aircloud.activity	aircloud aircloud 硬件 设备 wifi 智能 手要 平板电脑 电脑 存储 aircloud 文件 远程 型号 aircloud 硬件 设备 wifi 智能 手要 平板电脑 电脑 存储 aircloud 文件 远程 型号 效率 办公 存储 云盘 工具 效率办公 存储·云盘 系统工具"
