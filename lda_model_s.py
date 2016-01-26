@@ -5,17 +5,15 @@ LDA模型定义，一个文件搞定一个模型
 """
 
 import os
-import math
-import random
+import numpy
 import logging
-import operator
-import functools
-import statistics
 from collections import defaultdict
+
+# 导出只导出LDA模型
+__all__ = ["LdaModel"]
 
 
 # 全局变量---------------------------------------------------------------------------------------------------------------
-INF = float("inf")          # 无穷大值
 MAX_ITER_NUM = 10000        # 最大迭代次数
 VAR_NUM = 20                # 自动计算迭代次数时，计算方差的区间大小
 # 全局变量---------------------------------------------------------------------------------------------------------------
@@ -123,7 +121,7 @@ class BiDictionary(object):
 # ----------------------------------------------------------------------------------------------------------------------
 class CorpusSet(object):
     """
-    定义语料集（corpus）的类，作为LdaBase的基类
+    定义语料集类，作为LdaBase的基类
     """
 
     def __init__(self):
@@ -132,8 +130,8 @@ class CorpusSet(object):
         """
         # 定义关于word的变量
         self.local_bi = BiDictionary()      # id和word之间的本地双向字典，key为id，value为word
-        self.V = 0                          # 数据集中word的数量（排重之后的）
         self.words_count = 0                # 数据集中word的数量（排重之前的）
+        self.V = 0                          # 数据集中word的数量（排重之后的）
 
         # 定义关于article的变量
         self.artids_list = []               # 全部article的id的列表，按照数据读取的顺序存储
@@ -159,6 +157,7 @@ class CorpusSet(object):
         """
         # 清理数据--word数据
         self.local_bi.clear()
+        self.words_count = 0
 
         # 清理数据--article数据
         self.artids_list.clear()
@@ -195,12 +194,12 @@ class CorpusSet(object):
 
             # 更新类变量：必须article中word的数量大于0
             if len(art_wordid_list) > 0:
+                self.words_count += len(art_wordid_list)
                 self.artids_list.append(art_id)
                 self.arts_Z.append(art_wordid_list)
 
         # 做相关初始计算--word相关
         self.V = len(self.local_bi)
-        self.words_count = functools.reduce(operator.add, map(len, self.arts_Z))
         logging.debug("words number: " + str(self.V) + ", " + str(self.words_count))
 
         # 做相关初始计算--article相关
@@ -256,25 +255,25 @@ class LdaBase(CorpusSet):
         self.twords_num = 0         # LDA训练或推断结束后输出与每个topic相关的word的个数
 
         # 基础变量--2
-        self.alpha = None           # 超参数alpha，K维的float值，默认为50/K
-        self.beta = None            # 超参数beta，V维的float值，默认为0.01
+        self.alpha = numpy.zeros(self.K)            # 超参数alpha，K维的float值，默认为50/K
+        self.beta = numpy.zeros(self.V)             # 超参数beta，V维的float值，默认为0.01
 
         # 基础变量--3
-        self.Z = []                 # 所有word的topic信息，即Z(m, n)，维数为 M * article.size()
+        self.Z = []                                 # 所有word的topic信息，即Z(m, n)，维数为 M * article.size()
 
         # 统计计数(可由self.Z计算得到)
-        self.nd = None              # nd[m][k]用于保存第m篇article中第k个topic产生的词的个数，其维数为 M * K
-        self.ndsum = None           # ndsum[m]表示第m篇article的总词数，维数为 M
-        self.nw = None              # nw[w][k]用于保存第w个词中被第k个topic产生的数量，其维数为 V * K（教程中为K*V）
-        self.nwsum = None           # nwsum[k]表示第k个topic产生的词的总数，维数为 K
+        self.nd = numpy.zeros((self.M, self.K))     # nd[m, k]用于保存第m篇article中第k个topic产生的词的个数，其维数为 M * K
+        self.ndsum = numpy.zeros((self.M, 1))       # ndsum[m, 0]用于保存第m篇article的总词数，维数为 M * 1
+        self.nw = numpy.zeros((self.K, self.V))     # nw[k, w]用于保存第k个topic产生的词中第w个词的数量，其维数为 K * V
+        self.nwsum = numpy.zeros((self.K, 1))       # nwsum[k, 0]用于保存第k个topic产生的词的总数，维数为 K * 1
 
         # 多项式分布参数变量
-        self.theta = None           # Doc-Topic多项式分布的参数，维数为 M * K，由alpha值影响
-        self.phi = None             # Topic-Word多项式分布的参数，维数为 K * V，由beta值影响
+        self.theta = numpy.zeros((self.M, self.K))  # Doc-Topic多项式分布的参数，维数为 M * K，由alpha值影响
+        self.phi = numpy.zeros((self.K, self.V))    # Topic-Word多项式分布的参数，维数为 K * V，由beta值影响
 
         # 辅助变量，目的是提高算法执行效率
-        self.sum_alpha = 0.0        # alpha的和
-        self.sum_beta = 0.0         # beta的和
+        self.sum_alpha = 0.0                        # 超参数alpha的和
+        self.sum_beta = 0.0                         # 超参数beta的和
 
         # 先验知识，格式为id:[k1, k2, ...]
         self.prior_word = defaultdict(list)
@@ -291,14 +290,14 @@ class LdaBase(CorpusSet):
         assert self.M > 0 and self.K > 0 and self.Z
 
         # 统计计数初始化
-        self.nd = [[0 for k in range(self.K)] for m in range(self.M)]
-        self.ndsum = [0 for m in range(self.M)]
+        self.nd = numpy.zeros((self.M, self.K), dtype=numpy.int)
+        self.ndsum = numpy.zeros((self.M, 1), dtype=numpy.int)
 
-        # 根据self.Z进行更新，更新self.nd[m][k]和self.ndsum[m]
-        for m, k_list in enumerate(self.Z):
-            for k in k_list:
-                self.nd[m][k] += 1
-            self.ndsum[m] = len(self.Z[m])
+        # 根据self.Z进行更新，更新self.nd[m, k]和self.ndsum[m, 0]
+        for m in range(self.M):
+            for k in self.Z[m]:
+                self.nd[m, k] += 1
+            self.ndsum[m, 0] = len(self.Z[m])
         return
 
     def init_statistics_word(self):
@@ -308,14 +307,14 @@ class LdaBase(CorpusSet):
         assert self.V > 0 and self.K > 0 and self.Z and self.arts_Z
 
         # 统计计数初始化
-        self.nw = [[0 for k in range(self.K)] for w in range(self.V)]
-        self.nwsum = [0 for k in range(self.K)]
+        self.nw = numpy.zeros((self.K, self.V), dtype=numpy.int)
+        self.nwsum = numpy.zeros((self.K, 1), dtype=numpy.int)
 
-        # 根据self.Z进行更新，更新self.nw[w][k]和self.nwsum[k]
+        # 根据self.Z进行更新，更新self.nw[k, w]和self.nwsum[k, 0]
         for m in range(self.M):
-            for w, k in zip(self.arts_Z[m], self.Z[m]):
-                self.nw[w][k] += 1
-                self.nwsum[k] += 1
+            for k, w in zip(self.Z[m], self.arts_Z[m]):
+                self.nw[k, w] += 1
+                self.nwsum[k, 0] += 1
         return
 
     def init_statistics(self):
@@ -330,8 +329,8 @@ class LdaBase(CorpusSet):
         """
         :key: 计算alpha、beta的和
         """
-        self.sum_alpha = sum(self.alpha)
-        self.sum_beta = sum(self.beta)
+        self.sum_alpha = self.alpha.sum()
+        self.sum_beta = self.beta.sum()
         return
 
     def calculate_theta(self):
@@ -339,8 +338,7 @@ class LdaBase(CorpusSet):
         :key: 初始化并计算模型的theta值(M*K)，用到alpha值
         """
         assert self.sum_alpha > 0
-        self.theta = [[(self.nd[m][k] + self.alpha[k]) /
-                       (self.ndsum[m] + self.sum_alpha) for k in range(self.K)] for m in range(self.M)]
+        self.theta = (self.nd + self.alpha) / (self.ndsum + self.sum_alpha)
         return
 
     def calculate_phi(self):
@@ -348,8 +346,7 @@ class LdaBase(CorpusSet):
         :key: 初始化并计算模型的phi值(K*V)，用到beta值
         """
         assert self.sum_beta > 0
-        self.phi = [[(self.nw[w][k] + self.beta[w]) /
-                     (self.nwsum[k] + self.sum_beta) for w in range(self.V)] for k in range(self.K)]
+        self.phi = (self.nw + self.beta) / (self.nwsum + self.sum_beta)
         return
 
     # ---------------------------------------------计算Perplexity值------------------------------------------------------
@@ -365,10 +362,8 @@ class LdaBase(CorpusSet):
         preplexity = 0.0
         for m in range(self.M):
             for w in self.arts_Z[m]:
-                values = [self.theta[m][k] * self.phi[k][w] for k in range(self.K)]
-                preplexity += math.log(sum(values))
-
-        return math.exp(-(preplexity / self.words_count))
+                preplexity += numpy.log(numpy.sum(self.theta[m] * self.phi[:, w]))
+        return numpy.exp(-(preplexity / self.words_count))
 
     # --------------------------------------------------静态函数---------------------------------------------------------
     @staticmethod
@@ -381,8 +376,8 @@ class LdaBase(CorpusSet):
         for k in range(1, len(pro_list)):
             pro_list[k] += pro_list[k-1]
 
-        # 确定随机数 u 落在哪个下标值，此时的下标值即为抽取的类别（random返回: [0, 1.0) ）
-        u = random.random() * pro_list[-1]
+        # 确定随机数 u 落在哪个下标值，此时的下标值即为抽取的类别（random.rand()返回: [0, 1.0)）
+        u = numpy.random.rand() * pro_list[-1]
 
         return_index = len(pro_list) - 1
         for t in range(len(pro_list)):
@@ -398,26 +393,30 @@ class LdaBase(CorpusSet):
         :param is_calculate_preplexity: 是否计算preplexity值
         """
         # 计算preplexity值用到的变量
-        preplexity_list = []
-        preplexity_var = INF
+        pp_list = []
+        pp_var = numpy.inf
 
         # 开始迭代
         last_iter = self.current_iter + 1
         iters_num = self.iters_num if self.iters_num != 'auto' else MAX_ITER_NUM
         for self.current_iter in range(last_iter, last_iter+iters_num):
-            # 是否计算preplexity值
             info = "......"
+
+            # 是否计算preplexity值
             if is_calculate_preplexity:
-                preplexity = self.calculate_perplexity()
-                preplexity_list.append(preplexity)
-                preplexity_var = statistics.variance(preplexity_list[-VAR_NUM:]) if len(preplexity_list) >= VAR_NUM else INF
-                info = (", preplexity: " + str(preplexity)) + ((", var: " + str(preplexity_var)) if len(preplexity_list) >= VAR_NUM else "")
+                # 计算preplexity值
+                pp = self.calculate_perplexity()
+                pp_list.append(pp)
+
+                # 计算列表最新VAR_NUM项的方差
+                pp_var = numpy.var(pp_list[-VAR_NUM:]) if len(pp_list) >= VAR_NUM else numpy.inf
+                info = (", preplexity: " + str(pp)) + ((", var: " + str(pp_var)) if len(pp_list) >= VAR_NUM else "")
 
             # 输出Debug信息
             logging.debug("\titeration " + str(self.current_iter) + info)
 
             # 判断是否跳出循环
-            if self.iters_num == "auto" and preplexity_var < (VAR_NUM / 2):
+            if self.iters_num == "auto" and pp_var < (VAR_NUM / 2):
                 break
 
             # 对每篇article的每个word进行一次抽样，抽取合适的k值
@@ -427,40 +426,37 @@ class LdaBase(CorpusSet):
                     k = self.Z[m][n]
 
                     # 统计计数减一
-                    self.nd[m][k] -= 1
-                    self.ndsum[m] -= 1
-                    self.nw[w][k] -= 1
-                    self.nwsum[k] -= 1
+                    self.nd[m, k] -= 1
+                    self.ndsum[m, 0] -= 1
+                    self.nw[k, w] -= 1
+                    self.nwsum[k, 0] -= 1
 
                     if self.prior_word and (w in self.prior_word):
-                        # 带有先验知识
-                        k = random.choice(self.prior_word[w])
+                        # 带有先验知识，否则进行正常抽样
+                        k = numpy.random.choice(self.prior_word[w])
                     else:
-                        # 正常抽样
                         # 计算theta值--下边的过程为抽取第m篇article的第n个词w的topic，即新的k
-                        theta_p = [(self.nd[m][k] + self.alpha[k]) /
-                                   (self.ndsum[m] + self.sum_alpha) for k in range(self.K)]
+                        theta_p = (self.nd[m] + self.alpha) / (self.ndsum[m, 0] + self.sum_alpha)
 
                         # 计算phi值--判断是训练模型，还是推断模型（注意self.beta[w_g]）
                         if self.local_2_global and self.train_model:
                             w_g = self.local_2_global[w]
-                            phi_p = [(self.train_model.nw[w_g][k] + self.nw[w][k] + self.beta[w_g]) /
-                                     (self.train_model.nwsum[k] + self.nwsum[k] + self.sum_beta) for k in range(self.K)]
+                            phi_p = (self.train_model.nw[:, w_g] + self.nw[:, w] + self.beta[w_g]) / \
+                                    (self.train_model.nwsum[:, 0] + self.nwsum[:, 0] + self.sum_beta)
                         else:
-                            phi_p = [(self.nw[w][k] + self.beta[w]) /
-                                     (self.nwsum[k] + self.sum_beta) for k in range(self.K)]
+                            phi_p = (self.nw[:, w] + self.beta[w]) / (self.nwsum[:, 0] + self.sum_beta)
 
                         # multi_p为多项式分布的参数，此时没有进行标准化
-                        multi_p = [theta_p[k] * phi_p[k] for k in range(self.K)]
+                        multi_p = theta_p * phi_p
 
                         # 此时的topic即为Gibbs抽样得到的topic，它有较大的概率命中多项式概率大的topic
                         k = LdaBase.multinomial_sample(multi_p)
 
                     # 统计计数加一
-                    self.nd[m][k] += 1
-                    self.ndsum[m] += 1
-                    self.nw[w][k] += 1
-                    self.nwsum[k] += 1
+                    self.nd[m, k] += 1
+                    self.ndsum[m, 0] += 1
+                    self.nw[k, w] += 1
+                    self.nwsum[k, 0] += 1
 
                     # 更新Z值
                     self.Z[m][n] = k
@@ -489,7 +485,7 @@ class LdaBase(CorpusSet):
                 if key in ['topics_num', 'M', 'V', 'K', 'words_count']:
                     self.__dict__[key] = int(value)
                 elif key in ['alpha', 'beta']:
-                    self.__dict__[key] = [float(item) for item in value.split(',')]
+                    self.__dict__[key] = numpy.array([float(item) for item in value.split(',')])
         return
 
     def save_zvalue(self, file_name):
@@ -530,7 +526,7 @@ class LdaBase(CorpusSet):
         out_num = self.V if self.twords_num > self.V else self.twords_num
         with open(file_name, "w", encoding="utf-8") as f_twords:
             for k in range(self.K):
-                words_list = sorted([(w, self.phi[k][w]) for w in range(self.V)], key=lambda x: x[1], reverse=True)
+                words_list = sorted([(w, self.phi[k, w]) for w in range(self.V)], key=lambda x: x[1], reverse=True)
                 f_twords.write("Topic %dth:\n" % k)
                 f_twords.writelines(["\t%s %f\n" % (self.local_bi.get_value(w), p) for w, p in words_list[:out_num]])
         return
@@ -610,11 +606,11 @@ class LdaModel(LdaBase):
             self.twords_num = twords_num
 
             # 初始化alpha和beta
-            self.alpha = [alpha if alpha > 0 else (50.0/self.K) for k in range(self.K)]
-            self.beta = [beta if beta > 0 else 0.01 for w in range(self.V)]
+            self.alpha = numpy.array([alpha if alpha > 0 else (50.0/self.K) for k in range(self.K)])
+            self.beta = numpy.array([beta if beta > 0 else 0.01 for w in range(self.V)])
 
             # 初始化Z值，以便统计计数
-            self.Z = [[random.randint(0, self.K-1) for n in range(len(self.arts_Z[m]))] for m in range(self.M)]
+            self.Z = [[numpy.random.randint(self.K) for n in range(len(self.arts_Z[m]))] for m in range(self.M)]
         else:
             logging.debug("init an existed model")
 
@@ -694,7 +690,7 @@ class LdaModel(LdaBase):
         self.init_corpus_with_articles(article_list)
 
         # 初始化返回变量
-        return_theta = [[0.0 for k in range(self.K)] for m in range(self.M)]
+        return_theta = numpy.zeros((self.M, self.K))
 
         # 重复抽样
         for i in range(repeat_num):
@@ -705,7 +701,7 @@ class LdaModel(LdaBase):
             self.iters_num = iters_num
 
             # 初始化Z值，以便统计计数
-            self.Z = [[random.randint(0, self.K-1) for n in range(len(self.arts_Z[m]))] for m in range(self.M)]
+            self.Z = [[numpy.random.randint(self.K) for n in range(len(self.arts_Z[m]))] for m in range(self.M)]
 
             # 初始化统计计数
             self.init_statistics()
@@ -715,15 +711,10 @@ class LdaModel(LdaBase):
 
             # 计算theta
             self.calculate_theta()
-            for m in range(self.M):
-                for k in range(self.K):
-                    return_theta[m][k] += self.theta[m][k]
+            return_theta += self.theta
 
         # 计算结果，并返回
-        for m in range(self.M):
-            for k in range(self.K):
-                return_theta[m][k] /= 3
-        return return_theta
+        return return_theta / 3
 
 
 if __name__ == '__main__':
@@ -736,15 +727,15 @@ if __name__ == '__main__':
     # 测试新模型
     if test_type == "new":
         model = LdaModel()
-        model.init_train_model("data/", "model", current_iter=0, iters_num=50, topics_num=100, data_file="corpus_all.txt")
+        model.init_train_model("data/", "model", current_iter=0, iters_num=10, topics_num=100, data_file="corpus_all.txt")
         model.begin_gibbs_sampling_train()
     elif test_type == "continue":
         model = LdaModel()
-        model.init_train_model("data/", "model", current_iter=152, iters_num="auto", prior_file="prior.twords")
+        model.init_train_model("data/", "model", current_iter=142, iters_num="auto", prior_file="prior.twords")
         model.begin_gibbs_sampling_train()
     elif test_type == "inference":
         model = LdaModel()
-        model.init_inference_model(LdaModel().init_train_model("data/", "model", current_iter=321))
+        model.init_inference_model(LdaModel().init_train_model("data/", "model", current_iter=142))
         data = [
             "com.cmcomiccp.client	咪咕 漫画 咪咕 漫画 漫画 更名 咪咕 漫画 资源 偷星 国漫 全彩 日漫 实时 在线看 随心所欲 登陆 漫画 资源 黑白 全彩 航海王 火影忍者 龙珠 日漫 强势 咪咕 漫画 国内 日本 集英社 全彩 漫画 版权 国内 知名 漫画 工作室 合作 蔡志忠 姚非 夏达 黄玉郎 逢春 漫画家 优秀作品 国漫 漫画 界面 简洁 直观 画面 全彩 横屏 竖屏 流量 漫画 世界 作者 咪咕 数字 传媒 中文 内容 ui 界面 图书 频道 bug4 新咪咕 梦想 更名 咪咕 漫画 漫画 更名 咪咕 漫画 资源 偷星 国漫 全彩 日漫 实时 在线看 随心所欲 漫画 界面 简洁 直观 画面 全彩 横屏 竖屏 流量 漫画 世界 咪咕 漫画 漫画 更名 咪咕 漫画 资源 偷星 国漫 全彩 日漫 实时 在线看 随心所欲 漫画 界面 简洁 直观 画面 全彩 横屏 竖屏 流量 漫画 世界 新闻 漫画 搞笑 电子书 热血 动作 新闻阅读 漫画 搞笑 电子书 热血 动作",
             "com.cnmobi.aircloud.activity	aircloud aircloud 硬件 设备 wifi 智能 手要 平板电脑 电脑 存储 aircloud 文件 远程 型号 aircloud 硬件 设备 wifi 智能 手要 平板电脑 电脑 存储 aircloud 文件 远程 型号 效率 办公 存储 云盘 工具 效率办公 存储·云盘 系统工具"
