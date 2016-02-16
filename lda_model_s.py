@@ -9,6 +9,7 @@ import numpy
 import logging
 from collections import defaultdict
 
+
 # 导出只导出LDA模型
 __all__ = ["LdaModel"]
 
@@ -275,7 +276,7 @@ class LdaBase(CorpusSet):
         self.sum_alpha = 0.0                        # 超参数alpha的和
         self.sum_beta = 0.0                         # 超参数beta的和
 
-        # 先验知识，格式为id:[k1, k2, ...]
+        # 先验知识，格式为{word_id: [k1, k2, ...], ...}
         self.prior_word = defaultdict(list)
 
         # 推断时需要的训练模型
@@ -369,7 +370,7 @@ class LdaBase(CorpusSet):
     @staticmethod
     def multinomial_sample(pro_list):
         """
-        :key: 静态函数，多项式分布抽样
+        :key: 静态函数，多项式分布抽样，此时会改变pro_list的值
         :param pro_list: [0.2, 0.7, 0.4, 0.1]，此时说明返回下标1的可能性大，但也不绝对
         """
         # 将pro_list进行累加
@@ -398,13 +399,12 @@ class LdaBase(CorpusSet):
 
         # 开始迭代
         last_iter = self.current_iter + 1
-        iters_num = self.iters_num if self.iters_num != 'auto' else MAX_ITER_NUM
+        iters_num = self.iters_num if self.iters_num != "auto" else MAX_ITER_NUM
         for self.current_iter in range(last_iter, last_iter+iters_num):
             info = "......"
 
             # 是否计算preplexity值
             if is_calculate_preplexity:
-                # 计算preplexity值
                 pp = self.calculate_perplexity()
                 pp_list.append(pp)
 
@@ -486,6 +486,8 @@ class LdaBase(CorpusSet):
                     self.__dict__[key] = int(value)
                 elif key in ['alpha', 'beta']:
                     self.__dict__[key] = numpy.array([float(item) for item in value.split(',')])
+                else:
+                    pass
         return
 
     def save_zvalue(self, file_name):
@@ -495,7 +497,7 @@ class LdaBase(CorpusSet):
         with open(file_name, "w", encoding="utf-8") as f_zvalue:
             for m in range(self.M):
                 out_line = [str(w) + ':' + str(k) for w, k in zip(self.arts_Z[m], self.Z[m])]
-                f_zvalue.write('%s\t%s\n' % (self.artids_list[m], ' '.join(out_line)))
+                f_zvalue.write(self.artids_list[m] + "\t" + " ".join(out_line) + "\n")
         return
 
     def load_zvalue(self, file_name):
@@ -508,14 +510,12 @@ class LdaBase(CorpusSet):
         with open(file_name, "r", encoding="utf-8") as f_zvalue:
             for line in f_zvalue:
                 frags = line.strip().split()
-                self.artids_list.append(frags[0].strip())
-                w_list = []
-                k_list = []
-                for w, k in [value.split(':') for value in frags[1:]]:
-                    w_list.append(int(w))
-                    k_list.append(int(k))
-                self.arts_Z.append(w_list)
-                self.Z.append(k_list)
+                art_id = frags[0].strip()
+                w_k_list = [value.split(':') for value in frags[1:]]
+                # 添加到类中
+                self.artids_list.append(art_id)
+                self.arts_Z.append([int(item[0]) for item in w_k_list])
+                self.Z.append([int(item[1]) for item in w_k_list])
         return
 
     def save_twords(self, file_name):
@@ -542,8 +542,7 @@ class LdaBase(CorpusSet):
                 if line.startswith("Topic"):
                     topic = int(line.strip()[6:-3])
                 else:
-                    frags = line.strip().split()
-                    word_id = self.local_bi.get_key(frags[0].strip())
+                    word_id = self.local_bi.get_key(line.strip().split()[0].strip())
                     self.prior_word[word_id].append(topic)
         return
 
@@ -559,7 +558,7 @@ class LdaBase(CorpusSet):
 
     def save_model(self):
         """
-        :key: 保存模型
+        :key: 保存模型数据
         """
         name_predix = "%s-%05d" % (self.model_name, self.current_iter)
 
@@ -571,6 +570,18 @@ class LdaBase(CorpusSet):
         #保存额外数据
         self.save_twords(os.path.join(self.dir_path, '%s.%s' % (name_predix, "twords")))
         self.save_tag(os.path.join(self.dir_path, '%s.%s' % (name_predix, "tag")))
+        return
+
+    def load_model(self):
+        """
+        :key: 加载模型数据
+        """
+        name_predix = "%s-%05d" % (self.model_name, self.current_iter)
+
+        # 加载训练结果
+        self.load_parameter(os.path.join(self.dir_path, '%s.%s' % (name_predix, "param")))
+        self.load_wordmap(os.path.join(self.dir_path, '%s.%s' % (name_predix, "wordmap")))
+        self.load_zvalue(os.path.join(self.dir_path, '%s.%s' % (name_predix, "zvalue")))
         return
 
 
@@ -585,10 +596,10 @@ class LdaModel(LdaBase):
     def init_train_model(self, dir_path, model_name, current_iter, iters_num=None, topics_num=10, twords_num=200,
                          alpha=-1.0, beta=0.01, data_file='', prior_file=''):
         """
-        :key: 初始化训练模型，根据参数current_iter决定是初始化新模型，还是加载已有模型
-        :key: 当初始化新模型时，所有的参数都需要，除了prior_file先验文件
-        :key: 当加载已有模型时，只需要dir_path, model_name, current_iter, iters_num, twords_num即可
-        :param iters_num: 可以为整数值或者”auto“
+        :key: 初始化训练模型，根据参数current_iter（是否等于0）决定是初始化新模型，还是加载已有模型
+        :key: 当初始化新模型时，除了prior_file先验文件外，其余所有的参数都需要，且current_iter等于0
+        :key: 当加载已有模型时，只需要dir_path, model_name, current_iter（不等于0）, iters_num, twords_num即可
+        :param iters_num: 可以为整数值或者“auto”
         """
         if current_iter == 0:
             logging.debug("init a new train model")
@@ -622,16 +633,7 @@ class LdaModel(LdaBase):
             self.twords_num = twords_num
 
             # 加载已有模型
-            name_predix = "%s-%05d" % (self.model_name, self.current_iter)
-
-            # 加载dir_path目录下的模型参数文件，即加载topics_num, M, V, K, words_count, alpha, beta
-            self.load_parameter(os.path.join(self.dir_path, '%s.%s' % (name_predix, "param")))
-
-            # 加载dir_path目录下的wordmap文件，即加载self.local_bi和self.V
-            self.load_wordmap(os.path.join(self.dir_path, '%s.%s' % (name_predix, "wordmap")))
-
-            # 加载dir_path目录下的zvalue文件，即加载self.Z, self.arts_Z, self.arts_list等
-            self.load_zvalue(os.path.join(self.dir_path, '%s.%s' % (name_predix, "zvalue")))
+            self.load_model()
 
         # 初始化统计计数
         self.init_statistics()
@@ -646,13 +648,13 @@ class LdaModel(LdaBase):
         # 返回该模型
         return self
 
-    def begin_gibbs_sampling_train(self):
+    def begin_gibbs_sampling_train(self, is_calculate_preplexity=True):
         """
         :key: 训练模型，对语料集中的所有数据进行Gibbs抽样，并保存最后的抽样结果
         """
         # Gibbs抽样
         logging.debug('sample iteration start, iters_num: ' + str(self.iters_num))
-        self.gibbs_sampling(is_calculate_preplexity=True)
+        self.gibbs_sampling(is_calculate_preplexity)
         logging.debug('sample iteration finish')
 
         # 保存模型
@@ -714,7 +716,7 @@ class LdaModel(LdaBase):
             return_theta += self.theta
 
         # 计算结果，并返回
-        return return_theta / 3
+        return return_theta / repeat_num
 
 
 if __name__ == '__main__':
@@ -722,23 +724,20 @@ if __name__ == '__main__':
     测试代码
     """
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s\t%(levelname)s\t%(message)s")
-    test_type = "new"
+    test_type = "train"
 
     # 测试新模型
-    if test_type == "new":
+    if test_type == "train":
         model = LdaModel()
-        model.init_train_model("data/", "model", current_iter=0, iters_num=10, topics_num=100, data_file="corpus_all.txt")
-        model.begin_gibbs_sampling_train()
-    elif test_type == "continue":
-        model = LdaModel()
-        model.init_train_model("data/", "model", current_iter=142, iters_num="auto", prior_file="prior.twords")
+        model.init_train_model("data/", "model", current_iter=0, iters_num="auto",
+                               topics_num=10, data_file="corpus.txt", prior_file="prior.twords")
         model.begin_gibbs_sampling_train()
     elif test_type == "inference":
         model = LdaModel()
         model.init_inference_model(LdaModel().init_train_model("data/", "model", current_iter=142))
         data = [
-            "com.cmcomiccp.client	咪咕 漫画 咪咕 漫画 漫画 更名 咪咕 漫画 资源 偷星 国漫 全彩 日漫 实时 在线看 随心所欲 登陆 漫画 资源 黑白 全彩 航海王 火影忍者 龙珠 日漫 强势 咪咕 漫画 国内 日本 集英社 全彩 漫画 版权 国内 知名 漫画 工作室 合作 蔡志忠 姚非 夏达 黄玉郎 逢春 漫画家 优秀作品 国漫 漫画 界面 简洁 直观 画面 全彩 横屏 竖屏 流量 漫画 世界 作者 咪咕 数字 传媒 中文 内容 ui 界面 图书 频道 bug4 新咪咕 梦想 更名 咪咕 漫画 漫画 更名 咪咕 漫画 资源 偷星 国漫 全彩 日漫 实时 在线看 随心所欲 漫画 界面 简洁 直观 画面 全彩 横屏 竖屏 流量 漫画 世界 咪咕 漫画 漫画 更名 咪咕 漫画 资源 偷星 国漫 全彩 日漫 实时 在线看 随心所欲 漫画 界面 简洁 直观 画面 全彩 横屏 竖屏 流量 漫画 世界 新闻 漫画 搞笑 电子书 热血 动作 新闻阅读 漫画 搞笑 电子书 热血 动作",
-            "com.cnmobi.aircloud.activity	aircloud aircloud 硬件 设备 wifi 智能 手要 平板电脑 电脑 存储 aircloud 文件 远程 型号 aircloud 硬件 设备 wifi 智能 手要 平板电脑 电脑 存储 aircloud 文件 远程 型号 效率 办公 存储 云盘 工具 效率办公 存储·云盘 系统工具"
+            "cn	咪咕 漫画 咪咕 漫画 漫画 更名 咪咕 漫画 资源 偷星 国漫 全彩 日漫 实时 在线看 随心所欲 登陆 漫画 资源 黑白 全彩 航海王",
+            "co	aircloud aircloud 硬件 设备 wifi 智能 手要 平板电脑 电脑 存储 aircloud 文件 远程 型号 aircloud 硬件 设备 wifi"
         ]
         result = model.inference_data(data)
         print(result)
