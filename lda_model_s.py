@@ -14,10 +14,9 @@ from collections import defaultdict
 __all__ = ["LdaModel"]
 
 
-# 全局变量---------------------------------------------------------------------------------------------------------------
+# 全局变量
 MAX_ITER_NUM = 10000        # 最大迭代次数
 VAR_NUM = 20                # 自动计算迭代次数时，计算方差的区间大小
-# 全局变量---------------------------------------------------------------------------------------------------------------
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -148,7 +147,7 @@ class CorpusSet(object):
         """
         :key: 利用数据文件初始化语料集数据。文件每一行的数据格式：id[tab]word1 word2 word3......
         """
-        with open(file_name, 'r', encoding="utf-8") as file_iter:
+        with open(file_name, "r", encoding="utf-8") as file_iter:
             self.init_corpus_with_articles(file_iter)
         return
 
@@ -159,10 +158,12 @@ class CorpusSet(object):
         # 清理数据--word数据
         self.local_bi.clear()
         self.words_count = 0
+        self.V = 0
 
         # 清理数据--article数据
         self.artids_list.clear()
         self.arts_Z.clear()
+        self.M = 0
 
         # 清理数据--清理local到global的映射关系
         self.local_2_global.clear()
@@ -181,17 +182,19 @@ class CorpusSet(object):
             for word in [w.strip() for w in frags[1:] if w.strip()]:
                 local_id = self.local_bi.get_key(word) if self.local_bi.contains_value(word) else len(self.local_bi)
 
+                # 这里的self.global_bi为None和为空是有区别的
                 if self.global_bi is None:
                     # 更新id信息
                     self.local_bi.add_key_value(local_id, word)
                     art_wordid_list.append(local_id)
-                elif self.global_bi.contains_value(word):
-                    # 更新id信息
-                    self.local_bi.add_key_value(local_id, word)
-                    art_wordid_list.append(local_id)
+                else:
+                    if self.global_bi.contains_value(word):
+                        # 更新id信息
+                        self.local_bi.add_key_value(local_id, word)
+                        art_wordid_list.append(local_id)
 
-                    # 更新local_2_global
-                    self.local_2_global[local_id] = self.global_bi.get_key(word)
+                        # 更新local_2_global
+                        self.local_2_global[local_id] = self.global_bi.get_key(word)
 
             # 更新类变量：必须article中word的数量大于0
             if len(art_wordid_list) > 0:
@@ -210,7 +213,7 @@ class CorpusSet(object):
 
     def save_wordmap(self, file_name):
         """
-        :key: 保存word字典，即self.id_word_bi的数据
+        :key: 保存word字典，即self.local_bi的数据
         """
         with open(file_name, "w", encoding="utf-8") as f_save:
             f_save.write(str(self.local_bi))
@@ -218,7 +221,7 @@ class CorpusSet(object):
 
     def load_wordmap(self, file_name):
         """
-        :key: 加载word字典，即加载self.id_word_bi的值
+        :key: 加载word字典，即加载self.local_bi的数据
         """
         self.local_bi.clear()
         with open(file_name, "r", encoding="utf-8") as f_load:
@@ -251,8 +254,8 @@ class LdaBase(CorpusSet):
         self.model_name = ""        # LDA训练或推断的模型名称，也用于读取训练的结果
         self.current_iter = 0       # LDA训练或推断的模型已经迭代的次数，用于继续模型训练过程
         self.iters_num = 0          # LDA训练或推断过程中Gibbs抽样迭代的总次数，整数值或者'auto'
-        self.topics_num = 0         # LDA训练或推断过程中的topics的数量，即K值
-        self.K = 0                  # LDA训练或推断的模型中的topic的数量，即self.topics_num
+        self.topics_num = 0         # LDA训练或推断过程中的topic的数量，即self.K值
+        self.K = 0                  # LDA训练或推断过程中的topic的数量，即self.topics_num值
         self.twords_num = 0         # LDA训练或推断结束后输出与每个topic相关的word的个数
 
         # 基础变量--2
